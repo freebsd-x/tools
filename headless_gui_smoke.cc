@@ -13,6 +13,7 @@
 //
 // Exit 0 = PASS, 1 = FAIL.
 
+#include <algorithm>
 #include "xkit/xbus_client.h"
 #include "xserver/ipc_socket.h"
 #include "shared/protocol.h"
@@ -37,6 +38,10 @@ static void nap(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(
 // like SurfaceReady are consumed) and catching the CaptureFrame reply's shm fd
 // (which XBusClient::HandleIncoming would otherwise drop). Returns when the fd
 // arrives or the window elapses.
+// The size the compositor gave the window (SurfaceReady): it sizes app windows
+// itself and opens them centred for that size.
+static uint32_t g_ready_w = 0, g_ready_h = 0;
+
 static bool drain(std::shared_ptr<IpcSocket>& sock, XBusClient& xbus, int ms,
                   ScreencopyFrameInfo* out_info, UniqueFd* out_fd) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
@@ -44,6 +49,14 @@ static bool drain(std::shared_ptr<IpcSocket>& sock, XBusClient& xbus, int ms,
         auto r = sock->receiveMessage();
         if (r) {
             auto& [data, fd] = r.value();
+            if (data.size() == sizeof(RenderMessage)) {
+                const auto* rm = reinterpret_cast<const RenderMessage*>(data.data());
+                if (rm->status_ == RenderMessageStatus::SurfaceReady) {
+                    g_ready_w = rm->width_;
+                    g_ready_h = rm->height_;
+                }
+                continue;
+            }
             constexpr size_t kFrame = sizeof(XBusMessage);
             if (out_info && fd.isValid() && data.size() >= kFrame) {
                 const auto* xm = reinterpret_cast<const XBusMessage*>(data.data());
@@ -91,9 +104,10 @@ int main() {
 
     // Handshake: an XBus round-trip establishes the connection the same way the
     // proven input smoke does before driving surfaces.
-    { HeadlessInfo info{}; bool got = false;
+    HeadlessInfo hinfo{};
+    { bool got = false;
       xbus.Call("com.freebsdx.Headless", static_cast<uint32_t>(HeadlessOpcode::GetInfo), {},
-                [&](const XBusMessage& r){ std::memcpy(&info, r.payload_, sizeof(info)); got = true; });
+                [&](const XBusMessage& r){ std::memcpy(&hinfo, r.payload_, sizeof(hinfo)); got = true; });
       drain(cs, xbus, 2000, nullptr, nullptr);
       if (!got) { std::cout << "\033[1;31mFAIL\033[0m: no GetInfo reply (compositor not ready)\n"; return 1; }
     }
@@ -105,6 +119,12 @@ int main() {
     create.width_ = kW; create.height_ = kH;
     (void)cs->sendMessage({reinterpret_cast<const uint8_t*>(&create), sizeof(create)});
     drain(cs, xbus, 400, nullptr, nullptr);
+    if (g_ready_w == 0) { std::cout << "\033[1;31mFAIL\033[0m: no SurfaceReady for the window\n"; return 1; }
+    // Placed centred for the compositor's size (WindowStack::addWindow); the
+    // red kW x kH content then shrinks into place from that top-left corner.
+    const uint32_t win_x = static_cast<uint32_t>(std::max(24.0f, (static_cast<float>(hinfo.width_)  - g_ready_w) * 0.5f));
+    const uint32_t win_y = static_cast<uint32_t>(std::max(48.0f, (static_cast<float>(hinfo.height_) - g_ready_h) * 0.5f));
+    const uint32_t in_x = win_x + kW / 2, in_y = win_y + kH / 2;
 
     RenderMessage solid{};
     solid.surface_id_ = kId; solid.status_ = RenderMessageStatus::SolidColor;
@@ -136,16 +156,16 @@ int main() {
         return r > 200 && g < 60 && b < 60;
     };
 
-    uint32_t inside  = pixel(250, 200);   // global, inside the window at (50,78,400,300)
-    uint32_t outside = pixel(1000, 900);  // background
+    uint32_t inside  = pixel(in_x, in_y);              // the middle of the red window
+    uint32_t outside = pixel(10, info.height_ - 120);  // bare desktop, clear of window and taskbar
     bool in_ok  = is_red(inside);
     bool out_ok = !is_red(outside);
     munmap(map, map_len);
 
-    std::cout << "  window pixel (250,200) = 0x" << std::hex << (inside & 0xFFFFFF)
+    std::cout << "  window pixel (" << in_x << "," << in_y << ") = 0x" << std::hex << (inside & 0xFFFFFF)
               << (in_ok ? "  \033[1;32mred PASS\033[0m" : "  \033[1;31mnot red FAIL\033[0m")
               << std::dec << "\n";
-    std::cout << "  background (1000,900) = 0x" << std::hex << (outside & 0xFFFFFF)
+    std::cout << "  background (10," << info.height_ - 120 << ") = 0x" << std::hex << (outside & 0xFFFFFF)
               << (out_ok ? "  \033[1;32mnot red PASS\033[0m" : "  \033[1;31mred FAIL\033[0m")
               << std::dec << "\n";
 

@@ -15,6 +15,7 @@
 //
 // Exit 0 = PASS, 1 = FAIL.
 
+#include <algorithm>
 #include "xkit/xbus_client.h"
 #include "xserver/ipc_socket.h"
 #include "shared/protocol.h"
@@ -33,6 +34,10 @@ using namespace fbx::xkit;
 using namespace fbx::xserver;
 using namespace fbx::shared;
 
+// The size the compositor gave our window (SurfaceReady). It picks the size
+// itself — apps open at a fixed fraction of the output, whatever they ask for.
+static float g_ready_w = 0.0f, g_ready_h = 0.0f;
+
 static bool drain_until(std::shared_ptr<IpcSocket>& sock, XBusClient& xbus,
                         bool& flag, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now()
@@ -41,6 +46,14 @@ static bool drain_until(std::shared_ptr<IpcSocket>& sock, XBusClient& xbus,
         auto msg_res = sock->receiveMessage();
         if (msg_res) {
             const auto& data = msg_res.value().first;
+            if (data.size() == sizeof(RenderMessage)) {
+                const auto* rm = reinterpret_cast<const RenderMessage*>(data.data());
+                if (rm->status_ == RenderMessageStatus::SurfaceReady) {
+                    g_ready_w = static_cast<float>(rm->width_);
+                    g_ready_h = static_cast<float>(rm->height_);
+                }
+                continue;
+            }
             constexpr size_t kFrame = sizeof(XBusMessage);
             for (size_t off = 0; off + kFrame <= data.size(); off += kFrame) {
                 std::span<const uint8_t> frame(data.data() + off, kFrame);
@@ -230,17 +243,25 @@ int main() {
               << "  (reverts to arrow)  "
               << (stuck_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m") << "\n";
 
-    // 5. Windowed server-side hover: create a window (placed at 50,78) and move
-    //    the cursor onto its bottom resize edge; the unified injected-input path
-    //    must drive the s_resize cursor (22). This exercises the full loop —
-    //    surface registration → injected hover → resizeHitTest → arbitration —
+    // 5. Windowed server-side hover: create a window and move the cursor onto
+    //    its bottom resize edge; the unified injected-input path must drive the
+    //    s_resize cursor (22). This exercises the full loop — surface
+    //    registration → injected hover → resizeHitTest → arbitration —
     //    headless, the increment the input-path unification unblocked.
-    create_window(cs, /*id=*/1, /*w=*/400, /*h=*/300);
+    //    The compositor sizes app windows itself (reported in SurfaceReady) and
+    //    opens them centred (WindowStack::addWindow: x = max(24, (W-w)/2),
+    //    y = max(48, (H-h)/2)). The test used to assume its requested 400x300
+    //    at the old top-left spot (50,78) and missed the window's edges.
+    create_window(cs, /*id=*/1, 400, 300);
     settle();
-    float cx, cy;
+    float cx, cy;   // get_pointer drains the socket, which also reads SurfaceReady
     if (!get_pointer(cs, xbus, cx, cy)) { std::cout << "\033[1;31mFAIL\033[0m: GetPointer timed out\n"; return 1; }
-    // Bottom edge is at y = 78 + 300 = 378; pick an x inside the window (250).
-    inject_move(xbus, static_cast<int>(250.0f - cx), static_cast<int>(378.0f - cy));
+    if (g_ready_w <= 0.0f) { std::cout << "\033[1;31mFAIL\033[0m: no SurfaceReady for the window\n"; return 1; }
+    const float kWinW = g_ready_w, kWinH = g_ready_h;
+    const float win_x = std::max(24.0f, (static_cast<float>(info.width_)  - kWinW) * 0.5f);
+    const float win_y = std::max(48.0f, (static_cast<float>(info.height_) - kWinH) * 0.5f);
+    // The bottom edge, at an x inside the window.
+    inject_move(xbus, static_cast<int>(win_x + kWinW / 2 - cx), static_cast<int>(win_y + kWinH - cy));
     settle();
     uint32_t edge_shape = 0;
     if (!get_cursor_shape(cs, xbus, edge_shape)) { std::cout << "\033[1;31mFAIL\033[0m: GetCursorShape timed out\n"; return 1; }
@@ -251,18 +272,19 @@ int main() {
 
     // 6. Drag-and-drop cursors reflect the operation: over a valid target →
     //    move (or copy with Ctrl); off any target → no_drop. Reuses window 1
-    //    (created above, at 50,78 size 400x300) as the drop target.
+    //    (created above, centred) as the drop target.
     start_drag(xbus, /*source=*/999);  // 999 != target id 1
     settle();
     { float x, y; get_pointer(cs, xbus, x, y);
-      inject_move(xbus, static_cast<int>(200.0f - x), static_cast<int>(200.0f - y), 0); }
+      inject_move(xbus, static_cast<int>(win_x + kWinW / 2 - x), static_cast<int>(win_y + kWinH / 2 - y), 0); }
     settle();
     uint32_t s_move = 0; get_cursor_shape(cs, xbus, s_move);
     inject_move(xbus, 0, 0, /*Ctrl=*/2);  // same spot, Ctrl held
     settle();
     uint32_t s_copy = 0; get_cursor_shape(cs, xbus, s_copy);
     { float x, y; get_pointer(cs, xbus, x, y);
-      inject_move(xbus, static_cast<int>(1500.0f - x), static_cast<int>(900.0f - y), 0); }
+      // A bare-desktop corner well clear of the centred window.
+      inject_move(xbus, static_cast<int>(10.0f - x), static_cast<int>(static_cast<float>(info.height_) - 10.0f - y), 0); }
     settle();
     uint32_t s_nodrop = 0; get_cursor_shape(cs, xbus, s_nodrop);
     bool dnd_ok = (s_move == 13) && (s_copy == 12) && (s_nodrop == 14);

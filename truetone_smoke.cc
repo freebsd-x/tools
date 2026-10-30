@@ -151,8 +151,9 @@ int main() {
     bool persist_ok = (after.enabled_ == want_enabled && after.strength_ == want_strength);
     bool broadcast_ok = (bcast_ok && bcast_state.enabled_ == want_enabled &&
                          bcast_state.strength_ == want_strength);
-    // ambient_k_ is display-only: must be populated and survive a SetState.
-    bool ambient_ok = (after.ambient_k_ != 0 && after.ambient_k_ == initial.ambient_k_);
+    // ambient_k_ is display-only and must survive a SetState. 0 is honest
+    // when there's no ambient-light sensor (it used to be a made-up value).
+    bool ambient_ok = (after.ambient_k_ == initial.ambient_k_);
 
     std::cout << "  persistence:      " << (persist_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m") << "\n";
     std::cout << "  broadcast echo:   " << (broadcast_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m")

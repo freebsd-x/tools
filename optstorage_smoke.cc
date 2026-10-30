@@ -151,9 +151,9 @@ int main() {
     bool persist_ok = (after.enabled_ == want_enabled && after.target_pct_ == want_target);
     bool broadcast_ok = (bcast_ok && bcast_state.enabled_ == want_enabled &&
                          bcast_state.target_pct_ == want_target);
-    // reclaimable_mb_ is display-only: must be populated and survive a SetState.
-    bool reclaim_ok = (after.reclaimable_mb_ != 0 &&
-                       after.reclaimable_mb_ == initial.reclaimable_mb_);
+    // reclaimable_mb_ is display-only and must survive a SetState. 0 is honest
+    // before the first (hourly, background) measurement — it used to be made up.
+    bool reclaim_ok = (after.reclaimable_mb_ == initial.reclaimable_mb_);
 
     std::cout << "  persistence:         " << (persist_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m") << "\n";
     std::cout << "  broadcast echo:      " << (broadcast_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m")

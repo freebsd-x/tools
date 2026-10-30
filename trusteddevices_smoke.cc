@@ -104,73 +104,48 @@ int main() {
     auto cs = std::make_shared<IpcSocket>(UniqueFd(sock));
     XBusClient xbus(cs);
 
-    // Capture DevicesChanged broadcasts.
-    bool bcast_ok = false;
-    xbus.OnBroadcast([&](const XBusMessage& msg) {
-        if (std::strcmp(msg.service_name_, "com.freebsdx.TrustedDevices") == 0 &&
-            msg.opcode_ == static_cast<uint32_t>(TrustedDeviceOpcode::DevicesChanged)) {
-            bcast_ok = true;
-        }
-    });
+    // The list is the machine's known Bluetooth devices (it may well be empty)
+    // and pairing lives in root-only /etc/bluetooth/hcsecd.conf, so SetTrust is
+    // acknowledged without changing anything. Check that contract.
 
-    // 1. Walk the page list.
+    // 1. Walk the page list: total_ consistent, valid_=0 past the end.
     TrustedDevicePage first{};
     if (!td_list(cs, xbus, 0, first)) {
-        std::cout << "\033[1;31mFAIL\033[0m: ListDevices(0) timed out (service unbacked?)\n";
+        std::cout << "\033[1;31mFAIL\033[0m: ListDevices(0) timed out\n";
         return 1;
     }
-    if (!first.valid_ || first.total_ == 0) {
-        std::cout << "\033[1;31mFAIL\033[0m: empty/invalid first page\n";
-        return 1;
-    }
-    const std::string dev0 = first.device_name_;
-    const uint32_t    dev0_trust = first.trusted_;
-    const uint32_t    total = first.total_;
-
+    const uint32_t total = first.total_;
     uint32_t walked = 0;
-    bool has_more = true;
-    for (uint32_t p = 0; p < total + 2 && has_more; ++p) {
+    for (uint32_t p = 0; p < total; ++p) {
         TrustedDevicePage pg{};
         if (!td_list(cs, xbus, p, pg)) {
             std::cout << "\033[1;31mFAIL\033[0m: ListDevices(" << p << ") timed out\n";
             return 1;
         }
-        if (!pg.valid_) break;
-        std::cout << "  [" << pg.page_ << "] " << pg.device_name_
-                  << " — " << (pg.trusted_ ? "Trusted" : "Blocked")
-                  << (pg.has_more_ ? "" : "  (last)") << "\n";
+        if (!pg.valid_ || pg.total_ != total) break;
+        std::cout << "  [" << pg.page_ << "] " << pg.device_name_ << (pg.has_more_ ? "" : "  (last)") << "\n";
         ++walked;
-        has_more = pg.has_more_;
     }
-    // A page past the end must report valid_=0.
     TrustedDevicePage past{};
-    bool past_ok = td_list(cs, xbus, total, past) && (past.valid_ == 0);
-    bool walk_ok = (walked == total) && past_ok;
+    bool past_ok = td_list(cs, xbus, total, past) && past.valid_ == 0 && past.total_ == total;
+    bool walk_ok = walked == total && past_ok;
 
-    // 2. Flip dev0's trust and confirm broadcast + persistence.
-    const uint32_t flipped = dev0_trust ? 0u : 1u;
-    if (!td_set(cs, xbus, dev0, flipped)) {
-        std::cout << "\033[1;31mFAIL\033[0m: SetTrust not acked\n";
-        return 1;
+    // 2. SetTrust is acknowledged and changes nothing (no pretend pairing).
+    bool set_ok = true;
+    if (total > 0) {
+        const std::string dev0 = first.device_name_;
+        TrustedDevicePage after{};
+        set_ok = td_set(cs, xbus, dev0, first.trusted_ ? 0u : 1u) &&
+                 td_list(cs, xbus, 0, after) && after.trusted_ == first.trusted_;
     }
-    drain_until(cs, xbus, bcast_ok, 1000);
-
-    TrustedDevicePage after{};
-    bool reread = td_list(cs, xbus, 0, after);
-    bool persist_ok = reread && (std::string(after.device_name_) == dev0) &&
-                      (after.trusted_ == flipped);
 
     std::cout << "  page walk:      " << (walk_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m")
               << " (" << walked << "/" << total << " devices)\n";
-    std::cout << "  broadcast:      " << (bcast_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m")
-              << " (DevicesChanged)\n";
-    std::cout << "  trust persists: " << (persist_ok ? "\033[1;32mPASS\033[0m" : "\033[1;31mFAIL\033[0m")
-              << " ('" << dev0 << "' " << dev0_trust << "->" << after.trusted_ << ")\n";
+    std::cout << "  set trust:      " << (total == 0 ? "\033[1;33mSKIP\033[0m (no devices on this machine)"
+                                           : set_ok ? "\033[1;32mPASS\033[0m (acked, unchanged)"
+                                                    : "\033[1;31mFAIL\033[0m") << "\n";
 
-    // Restore original trust.
-    td_set(cs, xbus, dev0, dev0_trust);
-
-    const bool all_ok = walk_ok && bcast_ok && persist_ok;
+    const bool all_ok = walk_ok && set_ok;
     std::cout << (all_ok ? "\033[1;32m=== TrustedDevices smoke: PASS ===\033[0m\n"
                          : "\033[1;31m=== TrustedDevices smoke: FAIL ===\033[0m\n");
     return all_ok ? 0 : 1;
