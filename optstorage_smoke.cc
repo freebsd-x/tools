@@ -108,6 +108,17 @@ int main() {
     auto cs = std::make_shared<IpcSocket>(UniqueFd(sock));
     XBusClient xbus(cs);
 
+    // A shell-only service: register as the desktop shell (surface 999). A
+    // headless compositor lets a test client do that; the live seat accepts a
+    // shell surface only from the shell binaries.
+    {
+        RenderMessage shell{};
+        shell.surface_id_ = 999;
+        shell.status_     = RenderMessageStatus::ShellSurfaceCreated;
+        (void)cs->sendMessage({reinterpret_cast<const uint8_t*>(&shell), sizeof(shell)});
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
     // Capture StateChanged broadcasts.
     bool bcast_ok = false;
     OptStorageState bcast_state{};

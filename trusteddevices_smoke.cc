@@ -104,6 +104,17 @@ int main() {
     auto cs = std::make_shared<IpcSocket>(UniqueFd(sock));
     XBusClient xbus(cs);
 
+    // A shell-only service: register as the desktop shell (surface 999). A
+    // headless compositor lets a test client do that; the live seat accepts a
+    // shell surface only from the shell binaries.
+    {
+        RenderMessage shell{};
+        shell.surface_id_ = 999;
+        shell.status_     = RenderMessageStatus::ShellSurfaceCreated;
+        (void)cs->sendMessage({reinterpret_cast<const uint8_t*>(&shell), sizeof(shell)});
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
     // The list is the machine's known Bluetooth devices (it may well be empty)
     // and pairing lives in root-only /etc/bluetooth/hcsecd.conf, so SetTrust is
     // acknowledged without changing anything. Check that contract.

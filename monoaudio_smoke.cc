@@ -105,6 +105,17 @@ int main() {
     auto cs = std::make_shared<IpcSocket>(UniqueFd(sock));
     XBusClient xbus(cs);
 
+    // A shell-only service: register as the desktop shell (surface 999). A
+    // headless compositor lets a test client do that; the live seat accepts a
+    // shell surface only from the shell binaries.
+    {
+        RenderMessage shell{};
+        shell.surface_id_ = 999;
+        shell.status_     = RenderMessageStatus::ShellSurfaceCreated;
+        (void)cs->sendMessage({reinterpret_cast<const uint8_t*>(&shell), sizeof(shell)});
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
     // No surface handshake: xbus RPC is dispatched by service name and does not
     // require a registered render surface. (Headless mode bypasses the
     // presentation path that would ack SurfaceReady, so a handshake here would
