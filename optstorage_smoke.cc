@@ -120,13 +120,17 @@ int main() {
     }
 
     // Capture StateChanged broadcasts.
+    // The startup cache scan broadcasts too, so wait for the value that was set;
+    // bcast_state stays the latest received, and must end up being that value.
     bool bcast_ok = false;
     OptStorageState bcast_state{};
+    uint32_t want_enabled = 0, want_target = 0;
     xbus.OnBroadcast([&](const XBusMessage& msg) {
         if (std::strcmp(msg.service_name_, "com.freebsdx.OptStorage") == 0 &&
             msg.opcode_ == static_cast<uint32_t>(OptStorageOpcode::StateChanged)) {
             std::memcpy(&bcast_state, msg.payload_, sizeof(bcast_state));
-            bcast_ok = true;
+            if (bcast_state.enabled_ == want_enabled && bcast_state.target_pct_ == want_target)
+                bcast_ok = true;
         }
     });
 
@@ -141,13 +145,14 @@ int main() {
               << " reclaimableMB=" << initial.reclaimable_mb_ << "\n";
 
     // 2. Mutate to a distinctive value.
-    const uint32_t want_enabled = 1;
-    const uint32_t want_target = (initial.target_pct_ == 40) ? 25 : 40;
+    want_enabled = 1;
+    want_target = (initial.target_pct_ == 40) ? 25 : 40;
+    bcast_ok = false;
     if (!os_set(cs, xbus, want_enabled, want_target)) {
         std::cout << "\033[1;31mFAIL\033[0m: SetState not acked\n";
         return 1;
     }
-    drain_until(cs, xbus, bcast_ok, 1000);
+    drain_until(cs, xbus, bcast_ok, 5000);
 
     // 3. Read back.
     OptStorageState after{};
